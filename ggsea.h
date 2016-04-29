@@ -30,28 +30,9 @@ typedef struct ggsea_ctx_s ggsea_ctx_t;
  * @struct ggsea_params_s
  */
 struct ggsea_params_s {
-	/* copied: struct gaba_params_s in gaba.h */
-
-	/** dp options */
-	uint32_t reserved1;
-
-	/** input options */
-	uint8_t seq_a_format;
-	uint8_t seq_a_direction;
-	uint8_t seq_b_format;
-	uint8_t seq_b_direction;
-
-	/** output options */
-	uint32_t reserved2;
-
 	/** score parameters */
-	int32_t xdrop;
+	int16_t xdrop;
 	gaba_score_t const *score_matrix;
-
-	/** reserved */
-	uint64_t reserved3;
-
-	/* end of struct gaba_params_s */
 
 	/* repetitive kmer filter */
 	int64_t kmer_cnt_thresh;		/* kmer count threshold */

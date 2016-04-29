@@ -22,7 +22,15 @@
 #define UNITTEST_ALIAS_MAIN		0
 #endif
 
-#define _POSIX_C_SOURCE		2
+/* for compatibility with -std=c99 (2016/4/26 by Hajime Suzuki) */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE		200112L
+#endif
+
+#ifndef _BSD_SOURCE
+#define _BSD_SOURCE
+#endif
+/* end */
 
 #include <alloca.h>
 #include <ctype.h>
@@ -351,26 +359,6 @@ int ut_strcmp(
 }
 
 static inline
-int ut_strncmp(
-	char const *a,
-	char const *b,
-	uint64_t len)
-{
-	/* if both are NULL */
-	if(a == NULL && b == NULL) {
-		return(0);
-	}
-
-	if(b == NULL) {
-		return(1);
-	}
-	if(a == NULL) {
-		return(-1);
-	}
-	return(strncmp(a, b, len));
-}
-
-static inline
 char *ut_build_nm_cmd(
 	char const *filename)
 {
@@ -434,6 +422,7 @@ char *ut_dump_nm_output(
 	if(pclose(fp) != 0) {
 		goto _ut_nm_error_handler;
 	}
+	free(cmd); cmd = NULL;
 	return(res);
 
 _ut_nm_error_handler:
@@ -1075,7 +1064,7 @@ char *ut_build_short_option_string(struct option const *opts)
 	struct option const *po = NULL;
 
 	for(po = opts; po->name != NULL; po++) { len++; }
-	str = ps = (char *)malloc(2 * len);
+	str = ps = (char *)malloc(2 * len + 1);
 	for(po = opts; po->name != NULL; po++) {
 		*ps++ = (char)po->val;
 		if(po->has_arg != no_argument) {
@@ -1101,11 +1090,20 @@ int ut_modify_test_config_mark(
 		/* parse with comma */
 		while(*p != '\0' && *p != ',') { p++; }
 
+		/* copy string */
+		char buf[p - b + 1];
+		memcpy(buf, b, p - b);
+		buf[p - b] = '\0';
+
 		/* linear search among tests */
+		int marked = 0;
 		for(int64_t i = 0; i < cnt; i++) {
-			if(ut_strncmp(test[i].name, b, p - b) == 0) {
-				test[i].exec = 1;
+			if(ut_strcmp(test[i].name, buf) == 0) {
+				test[i].exec = 1; marked = 1;
 			}
+		}
+		if(marked == 0) {
+			fprintf(stderr, ut_color(UT_YELLOW, "Warning") ": group `%s' not found.\n", buf);
 		}
 
 		if(*p == '\0') { break; }

@@ -18,11 +18,14 @@ def configure(conf):
 	conf.load('ar')
 	conf.load('compiler_c')
 
-	conf.env.append_value('LIB_GGSEA',
-		conf.env.LIB_HMAP + conf.env.LIB_GREF + conf.env.LIB_GABA + conf.env.LIB_PSORT)
 	conf.env.append_value('CFLAGS', '-O3')
 	conf.env.append_value('CFLAGS', '-std=c99')
 	conf.env.append_value('CFLAGS', '-march=native')
+
+	conf.env.append_value('LIB_GGSEA',
+		conf.env.LIB_HMAP + conf.env.LIB_GREF + conf.env.LIB_GABA + conf.env.LIB_PSORT)
+	conf.env.append_value('OBJ_GGSEA',
+		['ggsea.o'] + conf.env.OBJ_HMAP + conf.env.OBJ_GREF + conf.env.OBJ_GABA + conf.env.OBJ_PSORT)
 
 
 def build(bld):
@@ -31,16 +34,17 @@ def build(bld):
 	bld.recurse('gaba')
 	bld.recurse('psort')
 
+	bld.objects(source = 'ggsea.c', target = 'ggsea.o')
+
 	bld.stlib(
-		source = ['ggsea.c'],
+		source = ['unittest.c'],
 		target = 'ggsea',
-		lib = bld.env.LIB_GGSEA,
-		use = ['hmap', 'gref', 'gaba', 'psort'])
+		use = bld.env.OBJ_GGSEA,
+		lib = bld.env.LIB_GGSEA)
 
 	bld.program(
 		source = ['unittest.c'],
 		target = 'unittest',
-		linkflags = ['-all_load'],
+		use = bld.env.OBJ_GGSEA,
 		lib = bld.env.LIB_GGSEA,
-		use = ['ggsea'],
 		defines = ['TEST'])

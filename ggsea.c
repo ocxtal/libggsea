@@ -9,8 +9,6 @@
  */
 
 #define UNITTEST_UNIQUE_ID			10
-#define UNITTEST 					1
-
 #include "unittest.h"
 
 #include <stdint.h>
@@ -229,7 +227,7 @@ ggsea_ctx_t *ggsea_ctx_init(
 	}
 
 	/* init node array */
-	uint32_t sec_cnt = gref_get_section_cnt(ref);
+	uint32_t sec_cnt = gref_get_section_count(ref);
 	ctx->node = (struct ggsea_node_s *)malloc(sizeof(struct ggsea_node_s) * sec_cnt);
 	if(ctx->node == NULL) {
 		goto _ggsea_ctx_init_error_handler;
@@ -731,8 +729,8 @@ void ggsea_extend(
 	ctx->fw_max = ctx->max;
 
 	/* initialize reverse root */
-	rsec = gref_get_section(ctx->r, gref_rev(rpos.gid));
-	qsec = gref_get_section(ctx->q, gref_rev(qpos.gid));
+	rsec = gref_get_section(ctx->r, gref_rev_gid(rpos.gid));
+	qsec = gref_get_section(ctx->q, gref_rev_gid(qpos.gid));
 
 	debug("reverse seed: r(%u, %u), q(%u, %u)", rsec->gid, rsec->len - rpos.pos, qsec->gid, qsec->len - qpos.pos);
 
@@ -918,6 +916,8 @@ ggsea_result_t ggsea_align(
 	debug("done. %llu alignments generated", kv_size(aln));
 
 	return((struct ggsea_result_s){
+		.ref = ctx->r,
+		.query = ctx->q,
 		.aln = kv_ptr(aln),
 		.cnt = kv_size(aln)
 	});

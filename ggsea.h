@@ -59,6 +59,8 @@ typedef struct ggsea_params_s ggsea_params_t;
  * @struct ggsea_result_s
  */
 struct ggsea_result_s {
+	gref_idx_t const *ref;
+	gref_acv_t const *query;
 	struct gaba_result_s const *const *aln;
 	int64_t cnt;
 };

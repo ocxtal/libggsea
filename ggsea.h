@@ -37,12 +37,14 @@ struct ggsea_params_s {
 	/* repetitive kmer filter */
 	int64_t kmer_cnt_thresh;		/* kmer count threshold */
 
-	/* popcnt filter thresh */
-	int64_t popcnt_thresh;			/* first threshold */
-	int64_t popcnt_low_thresh;		/* rescue threshold */
-
 	/* overlap filter thresh */
 	int64_t overlap_thresh;			/* depth */
+
+	/* popcnt filter thresh */
+	int64_t popcnt_thresh;			/* threshold */
+
+	/* score thresh */
+	int64_t score_thresh;
 
 	/* number of threads in parallel radix sort */
 	uint32_t num_threads;

@@ -58,9 +58,9 @@ ggsea_conf_t *ggsea_conf_init(
 	#define restore(param, def)		{ (param) = ((uint64_t)(param) == 0) ? (def) : (param); }
 
 	restore(p.kmer_cnt_thresh, 100);
-	restore(p.popcnt_thresh, 25);
-	restore(p.popcnt_low_thresh, 15);
 	restore(p.overlap_thresh, 3);
+	restore(p.popcnt_thresh, 25);
+	restore(p.score_thresh, 0);			/* score positive */
 	restore(p.num_threads, 0);
 
 	#undef restore
@@ -75,6 +75,7 @@ ggsea_conf_t *ggsea_conf_init(
 
 	/* init alignment context */
 	conf->gaba = gaba_init(GABA_PARAMS(
+		/*.popcnt = p.popcnt_thresh,*/
 		.xdrop = p.xdrop,
 		.score_matrix = p.score_matrix));
 	if(conf->gaba == NULL) {
@@ -110,6 +111,7 @@ void ggsea_conf_clean(
  */
 struct ggsea_rep_kmer_cont_s {
 	hmap_header_t header;
+	uint64_t vec_size;
 	kvec_t(struct gref_gid_pos_s) rv;
 	kvec_t(struct gref_gid_pos_s) qv;
 };
@@ -165,26 +167,32 @@ struct ggsea_ctx_s {
 	/* repetitive kmer container */
 	hmap_t *rep_kmer;
 
-	/* weak kmer list */
-	kvec_t(struct ggsea_weak_kmer_s) weak_kmer;
+	/* overlap filter */
 
 	/* dp context */
 	gaba_dp_t *dp;
 	struct ggsea_node_s *node;			/* node info array */
-	kvec_t(struct ggsea_segq_s) dagq;	/* queue with segments in dag subgraph */
+	kvec_t(struct ggsea_segq_s) segq;	/* segment queue */
 	uint8_t *margin;
 	struct gref_section_s fw_margin, rv_margin;
-
-	/* max */
-	gaba_fill_t const *max, *fw_max, *rv_max;
-
-	/* score order info */
-
-	/* red-black-tree に入れるんだったっけ?? */
-
-	/* result container */
-	kvec_t(struct ggsea_fill_pair_s) res;
 };
+
+
+/**
+ * @fn ggsea_ctx_clean
+ */
+void ggsea_ctx_clean(
+	ggsea_ctx_t *ctx)
+{
+	if(ctx != NULL) {
+		hmap_clean(ctx->rep_kmer); ctx->rep_kmer = NULL;
+		gaba_dp_clean(ctx->dp); ctx->dp = NULL;
+		kv_hq_destroy(ctx->segq);
+		free(ctx->margin); ctx->margin = NULL;
+		free(ctx);
+	}
+	return;
+}
 
 /**
  * @fn ggsea_ctx_init
@@ -203,7 +211,8 @@ ggsea_ctx_t *ggsea_ctx_init(
 
 	/* init contexts */
 	ctx->rep_kmer = hmap_init(
-		conf->rep_kmer_hmap_size, sizeof(struct ggsea_rep_kmer_cont_s));
+		sizeof(struct ggsea_rep_kmer_cont_s),
+		HMAP_PARAMS(.hmap_size = conf->rep_kmer_hmap_size));
 	if(ctx->rep_kmer == NULL) {
 		goto _ggsea_ctx_init_error_handler;
 	}
@@ -234,11 +243,11 @@ ggsea_ctx_t *ggsea_ctx_init(
 	}
 
 	/* init queue */
-	kv_hq_init(ctx->dagq);
-	if(kv_ptr(ctx->dagq) == NULL) {
+	kv_hq_init(ctx->segq);
+	if(kv_ptr(ctx->segq) == NULL) {
 		goto _ggsea_ctx_init_error_handler;
 	}
-	debug("init, hq_size(%llu)", kv_hq_size(ctx->dagq));
+	debug("init, hq_size(%llu)", kv_hq_size(ctx->segq));
 
 	/* init margin seq */
 	ctx->margin = (uint8_t *)malloc(2 * sizeof(uint8_t) * MARGIN_SEQ_SIZE);
@@ -262,44 +271,13 @@ ggsea_ctx_t *ggsea_ctx_init(
 		.len = MARGIN_SEQ_LEN,
 		.base = &ctx->margin[MARGIN_SEQ_SIZE]
 	};
-
-	/* init max */
-	ctx->max = ctx->fw_max = ctx->rv_max = NULL;
-
-	/* init result array */
-	kv_init(ctx->res);
-
 	return(ctx);
 
 _ggsea_ctx_init_error_handler:;
 	if(ctx != NULL) {
-		hmap_clean(ctx->rep_kmer); ctx->rep_kmer = NULL;
-		gaba_dp_clean(ctx->dp); ctx->dp = NULL;
-		free(ctx->node); ctx->node = NULL;
-		kv_hq_destroy(ctx->dagq);
-		free(ctx->margin); ctx->margin = NULL;
-		kv_destroy(ctx->res);
-		free(ctx);
+		ggsea_ctx_clean(ctx);
 	}
 	return(NULL);
-}
-
-/**
- * @fn ggsea_ctx_clean
- */
-void ggsea_ctx_clean(
-	ggsea_ctx_t *ctx)
-{
-	if(ctx != NULL) {
-		hmap_clean(ctx->rep_kmer); ctx->rep_kmer = NULL;
-		gaba_dp_clean(ctx->dp); ctx->dp = NULL;
-		free(ctx->node); ctx->node = NULL;
-		kv_hq_destroy(ctx->dagq);
-		free(ctx->margin); ctx->margin = NULL;
-		kv_destroy(ctx->res);
-		free(ctx);
-	}
-	return;
 }
 
 /**
@@ -317,18 +295,17 @@ void ggsea_ctx_flush(
 	ctx->qlim = 2 * gref_get_total_len(query);
 
 	/* flush queues */
-	kv_hq_clear(ctx->dagq);
+	kv_hq_clear(ctx->segq);
 
 	/* flush dp context for the new read */
 	gaba_dp_flush(ctx->dp, gref_get_lim(ctx->r), gref_get_lim(ctx->q));
-
-	/* flush result array */
-	kv_clear(ctx->res);
 
 	debug("flushed");
 	return;
 }
 
+
+/* repetitive kmer filters */
 /**
  * @fn ggsea_dedup_rep_kmer
  */
@@ -368,429 +345,24 @@ void ggsea_save_rep_kmer(
 	
 	/* add rpos */
 	kv_push(c->rv, rpos);
-	if(kv_size(c->rv) > ctx->conf.max_rep_vec_size) {
+	if(kv_size(c->rv) > c->vec_size) {
 		kv_size(c->rv) = ggsea_dedup_rep_kmer(ctx, kv_ptr(c->rv), kv_size(c->rv));
 	}
 
 	kv_push(c->qv, qpos);
-	if(kv_size(c->qv) > ctx->conf.max_rep_vec_size) {
+	if(kv_size(c->qv) > c->vec_size) {
 		kv_size(c->qv) = ggsea_dedup_rep_kmer(ctx, kv_ptr(c->qv), kv_size(c->qv));
 	}
-	return;
-}
 
-/**
- * @fn ggsea_save_weak_kmer
- */
-static _force_inline
-void ggsea_save_weak_kmer(
-	struct ggsea_ctx_s *ctx,
-	int64_t popcnt_score,
-	struct gref_gid_pos_s rpos,
-	struct gref_gid_pos_s qpos)
-{
-	/* discard seed if popcnt_score is below the threshold */
-	if(popcnt_score < ctx->conf.params.popcnt_low_thresh) {
-		return;
-	}
-
-	/* push to vector */
-	kv_push(ctx->weak_kmer, ((struct ggsea_weak_kmer_s){
-		.rpos = rpos,
-		.qpos = qpos
-	}));
-	return;
-}
-
-/**
- * @fn ggsea_popcnt_filter
- */
-static _force_inline
-int64_t ggsea_popcnt_filter(
-	struct ggsea_ctx_s *ctx,
-	struct gref_gid_pos_s rpos,
-	struct gref_gid_pos_s qpos)
-{
-	return(30);
-}
-
-/**
- * @fn ggsea_update_link_mask
- */
-static _force_inline
-uint64_t ggsea_update_link_mask(
-	struct ggsea_ctx_s *ctx,
-	uint32_t rgid,
-	uint32_t qgid)
-{
-	return(0);
-}
-
-/**
- * @fn ggsea_get_full_mask
- */
-static _force_inline
-uint64_t ggsea_get_full_mask(
-	struct ggsea_ctx_s *ctx,
-	uint32_t gid)
-{
-	return(0);
-}
-
-/**
- * @fn ggsea_get_ndag_section
- */
-static _force_inline
-struct ggsea_segq_s ggsea_get_ndag_section(
-	struct ggsea_ctx_s *ctx)
-{
-	return((struct ggsea_segq_s){ 0 });
-}
-
-/**
- * @macro _rup, _qup
- * @brief extract update flag
- */
-#define _rup(_fill)			( (_fill)->status & GABA_STATUS_UPDATE_A )
-#define _qup(_fill)			( (_fill)->status & GABA_STATUS_UPDATE_B )
-#define _rqup(_fill)		( (_fill)->status & (GABA_STATUS_UPDATE_A | GABA_STATUS_UPDATE_B) )
-#define _term(_fill)		( (_fill)->status & GABA_STATUS_TERM )
-
-/**
- * @fn ggsea_extend_update_r
- */
-static _force_inline
-void ggsea_extend_update_r(
-	struct ggsea_ctx_s *ctx,
-	gaba_fill_t const *fill,
-	struct gref_section_s const *rsec,
-	struct gref_section_s const *qsec)
-{
-	struct gref_link_s rlink = gref_get_link(ctx->r, rsec->gid);
-
-	/* if len == 0, push margin */
-	if(rlink.len == 0) {
-		debug("r reached leaf");
-		/* update rsec with fw_margin */
-		rsec = &ctx->fw_margin;
-
-		/* fill loop */
-		while(1) {
-			fill = gaba_dp_fill(ctx->dp, fill,
-				(struct gaba_section_s *)rsec,
-				(struct gaba_section_s *)qsec);
-			debug("status(%x), max(%lld), r(%u), q(%u)",
-				fill->status, fill->max, rsec->gid, qsec->gid);
-			ctx->max = (fill->max > ctx->max->max) ? fill : ctx->max;
-			if(_term(fill) | _rup(fill)) { break; }
-			qsec = (_qup(fill) == 0) ? qsec : &ctx->rv_margin;
-		}
-		return;
-	}
-
-	/* push section pair if all the incoming edges are scaned */
-	for(int64_t i = 0; i < rlink.len; i++) {
-		uint32_t rgid = rlink.gid_arr[i];
-
-		/* update link mask */
-		uint64_t mask = ggsea_update_link_mask(ctx, rgid, rsec->gid);
-
-		/* get full mask */
-		uint64_t full = ggsea_get_full_mask(ctx, rgid);
-
-		if(mask != full) { continue; }
-
-		/* push queue */
-		kv_hq_push(ctx->dagq, ((struct ggsea_segq_s){
-			.fill = fill,
-			.rgid = rgid,
-			.qgid = qsec->gid
-		}));
+	/* expand vector if spilled */
+	if(kv_size(c->rv) > c->vec_size && kv_size(c->qv) > c->vec_size) {
+		c->vec_size *= 2;
 	}
 	return;
 }
 
-/**
- * @fn ggsea_extend_update_q
- */
-static _force_inline
-void ggsea_extend_update_q(
-	struct ggsea_ctx_s *ctx,
-	gaba_fill_t const *fill,
-	struct gref_section_s const *rsec,
-	struct gref_section_s const *qsec)
-{
-	struct gref_link_s qlink = gref_get_link(ctx->q, qsec->gid);
 
-	/* if len == 0, push margin */
-	if(qlink.len == 0) {
-		debug("q reached leaf");
-		/* update qsec with rv_margin */
-		qsec = &ctx->rv_margin;
-
-		/* fill loop */
-		while(1) {
-			fill = gaba_dp_fill(ctx->dp, fill,
-				(struct gaba_section_s *)rsec,
-				(struct gaba_section_s *)qsec);
-			debug("status(%x), max(%lld), r(%u), q(%u)",
-				fill->status, fill->max, rsec->gid, qsec->gid);
-			ctx->max = (fill->max > ctx->max->max) ? fill : ctx->max;
-
-			if(_term(fill) | _qup(fill)) { break; }
-			rsec = (_rup(fill) == 0) ? rsec : &ctx->fw_margin;
-		}
-		return;
-	}
-
-	/* push section pair if all the incoming edges are scaned */
-	for(int64_t i = 0; i < qlink.len; i++) {
-		uint32_t qgid = qlink.gid_arr[i];
-
-		/* update link mask */
-		uint64_t mask = ggsea_update_link_mask(ctx, qgid, qsec->gid);
-
-		/* get full mask */
-		uint64_t full = ggsea_get_full_mask(ctx, qgid);
-
-		if(mask != full) { continue; }
-
-		/* push queue */
-		kv_hq_push(ctx->dagq, ((struct ggsea_segq_s){
-			.fill = fill,
-			.rgid = rsec->gid,
-			.qgid = qgid
-		}));
-	}
-	return;
-}
-
-/**
- * @fn ggsea_extend_update_rq
- */
-static _force_inline
-void ggsea_extend_update_rq(
-	struct ggsea_ctx_s *ctx,
-	gaba_fill_t const *fill,
-	struct gref_section_s const *rsec,
-	struct gref_section_s const *qsec)
-{
-	/* update sections */
-	struct gref_link_s rlink = gref_get_link(ctx->r, rsec->gid);
-	struct gref_link_s qlink = gref_get_link(ctx->q, qsec->gid);
-
-	if((rlink.len | qlink.len) == 0) {
-		debug("r and q reached leaf");
-		/* fill once */
-		fill = gaba_dp_fill(ctx->dp, fill,
-			(struct gaba_section_s *)&ctx->fw_margin,
-			(struct gaba_section_s *)&ctx->rv_margin);
-		debug("status(%x), max(%lld), r(%u), q(%u)",
-			fill->status, fill->max, rsec->gid, qsec->gid);
-		ctx->max = (fill->max > ctx->max->max) ? fill : ctx->max;
-		return;
-	}
-
-	/* push section pair if all the incoming edges are scaned */
-	for(int64_t i = 0; i < rlink.len; i++) {
-		uint32_t rgid = rlink.gid_arr[i];
-
-		/* update link mask */
-		uint64_t rmask = ggsea_update_link_mask(ctx, rgid, rsec->gid);
-
-		/* get full mask */
-		uint64_t rfull = ggsea_get_full_mask(ctx, rgid);
-
-		if(rmask != rfull) { continue; }
-
-		for(int64_t j = 0; j < qlink.len; j++) {
-			uint32_t qgid = qlink.gid_arr[j];
-
-			/* update link mask */
-			uint64_t qmask = ggsea_update_link_mask(ctx, rgid, rsec->gid);
-
-			/* get full mask */
-			uint64_t qfull = ggsea_get_full_mask(ctx, rgid);
-
-			if(qmask != qfull) { continue; }
-
-			/* push queue */
-			kv_hq_push(ctx->dagq, ((struct ggsea_segq_s){
-				.fill = fill,
-				.rgid = rgid,
-				.qgid = qgid
-			}));
-		}
-	}
-	return;
-}
-
-/**
- * @fn ggsea_extend_update
- */
-static _force_inline
-void ggsea_extend_update(
-	struct ggsea_ctx_s *ctx,
-	gaba_fill_t const *fill,
-	struct gref_section_s const *rsec,
-	struct gref_section_s const *qsec)
-{
-	uint64_t rup = _rup(fill) != 0;
-	uint64_t qup = _qup(fill) != 0;
-
-	debug("extend_update, r(%llu), q(%llu)", rup, qup);
-
-	if(rup && qup) {
-		ggsea_extend_update_rq(ctx, fill, rsec, qsec);
-	} else if(rup) {
-		ggsea_extend_update_r(ctx, fill, rsec, qsec);
-	} else if(qup) {
-		ggsea_extend_update_q(ctx, fill, rsec, qsec);
-	} else {
-		/* never reaches here */
-	}
-	return;
-}
-
-/**
- * @fn ggsea_extend_loop
- */
-static _force_inline
-int ggsea_extend_loop(
-	struct ggsea_ctx_s *ctx)
-{
-	/* pop next section */
-	debug("extend_loop, hq_size(%llu)", kv_hq_size(ctx->dagq));
-
-	struct ggsea_segq_s seg = (kv_hq_size(ctx->dagq) > 0)
-		? kv_hq_pop(ctx->dagq)
-		: ggsea_get_ndag_section(ctx);
-
-	if(seg.fill == NULL) {
-		debug("term");
-		return(-1);
-	}
-
-	/* extend */
-	struct gref_section_s const *rsec = gref_get_section(ctx->r, seg.rgid);
-	struct gref_section_s const *qsec = gref_get_section(ctx->q, seg.qgid);
-	gaba_fill_t *fill = gaba_dp_fill(ctx->dp, seg.fill,
-		(struct gaba_section_s *)rsec,
-		(struct gaba_section_s *)qsec);
-
-	/* update max */
-	debug("check max, max(%lld), prev_max(%lld)", fill->max, ctx->max->max);
-	ctx->max = (fill->max > ctx->max->max) ? fill : ctx->max;
-
-	/* check xdrop term */
-	if(fill->status & GABA_STATUS_TERM) {
-		return(-1);
-	}
-
-	/* check update flag */
-	ggsea_extend_update(ctx, fill, rsec, qsec);
-	return(0);
-}
-
-/**
- * @fn ggsea_extend
- */
-static _force_inline
-void ggsea_extend(
-	struct ggsea_ctx_s *ctx,
-	struct gref_gid_pos_s rpos,
-	struct gref_gid_pos_s qpos)
-{
-	debug("extend");
-
-	/* initialize forward root */
-	struct gref_section_s const *rsec = gref_get_section(ctx->r, rpos.gid);
-	struct gref_section_s const *qsec = gref_get_section(ctx->q, qpos.gid);
-
-	debug("forward seed: r(%u, %u), q(%u, %u)", rsec->gid, rpos.pos, qsec->gid, qpos.pos);
-
-	gaba_fill_t const *fill = ctx->max = gaba_dp_fill_root(ctx->dp,
-		(struct gaba_section_s *)rsec, rpos.pos,
-		(struct gaba_section_s *)qsec, qpos.pos);
-
-	debug("forward root: status(%x), max(%lld), r(%u, %u), q(%u, %u)",
-		fill->status, fill->max, rsec->gid, rpos.pos, qsec->gid, qpos.pos);
-
-	/* check xdrop term */
-	if((fill->status & GABA_STATUS_TERM) == 0) {
-		/* update first joint */
-		ggsea_extend_update(ctx, fill, rsec, qsec);
-
-		/* loop */
-		while(ggsea_extend_loop(ctx) == 0) {}
-	}
-
-	/* save max */
-	ctx->fw_max = ctx->max;
-
-	/* initialize reverse root */
-	rsec = gref_get_section(ctx->r, gref_rev_gid(rpos.gid));
-	qsec = gref_get_section(ctx->q, gref_rev_gid(qpos.gid));
-
-	debug("reverse seed: r(%u, %u), q(%u, %u)", rsec->gid, rsec->len - rpos.pos, qsec->gid, qsec->len - qpos.pos);
-
-	fill = ctx->max = gaba_dp_fill_root(ctx->dp,
-		(struct gaba_section_s *)rsec, rsec->len - rpos.pos,
-		(struct gaba_section_s *)qsec, qsec->len - qpos.pos);
-
-	debug("reverse root: status(%x), max(%lld), r(%u, %u), q(%u, %u)",
-		fill->status, fill->max, rsec->gid, rpos.pos, qsec->gid, qpos.pos);
-
-	/* chech xdrop term */
-	if((fill->status & GABA_STATUS_TERM) == 0) {
-		/* update first joint */
-		ggsea_extend_update(ctx, fill, rsec, qsec);
-
-		/* loop */
-		while(ggsea_extend_loop(ctx) == 0) {}
-	}
-
-	/* save max */
-	ctx->rv_max = ctx->max;
-
-	debug("fw_max(%lld), rv_max(%lld), max(%lld)",
-		ctx->fw_max->max, ctx->rv_max->max, ctx->fw_max->max + ctx->rv_max->max);
-
-	/* return max pair */
-	kv_push(ctx->res, ((struct ggsea_fill_pair_s){
-		.fw = ctx->fw_max,
-		.rv = ctx->rv_max
-	}));
-}
-
-#if 0
-/**
- * @fn ggsea_refine_results
- */
-static _force_inline
-ggsea_result_t ggsea_refine_results(
-	struct ggsea_ctx_s *ctx)
-{
-	/* traceback */
-	kvec_t(struct gaba_result_s const *) aln = { 0, 0, NULL };
-	kv_reserve(aln, kv_size(ctx->res));
-	for(int64_t i = 0; i < kv_size(ctx->res); i++) {
-		struct gaba_result_s const *r = gaba_dp_trace(ctx->dp,
-			kv_at(ctx->res, i).fw, kv_at(ctx->res, i).rv, NULL);
-		kv_push(aln, r);
-	}
-
-	/* pack result */
-	struct ggsea_result_s r = {
-		.aln = kv_ptr(aln),
-		.cnt = kv_size(aln)
-	};
-
-	/* finish */
-	return((ggsea_result_t)r);
-}
-#endif
-
+/* overlap filters (not implemented yet) */
 /**
  * @fn ggsea_overlap_filter
  */
@@ -818,14 +390,284 @@ void ggsea_save_overlap_kmer(
 }
 
 /**
- * @fn ggsea_finish
+ * @fn ggsea_update_overlap_section
  */
 static _force_inline
-int ggsea_finish(
-	struct ggsea_ctx_s *ctx)
+void ggsea_update_overlap_section(
+	struct ggsea_ctx_s *ctx,
+	struct ggsea_fill_pair_s pair,
+	struct gaba_result_s const *r)
 {
-	return(1);
+	return;
 }
+
+
+/* graph traverse functions */
+/**
+ * @macro _rup, _qup
+ * @brief extract update flag
+ */
+#define _rup(_fill)			( (_fill)->status & GABA_STATUS_UPDATE_A )
+#define _qup(_fill)			( (_fill)->status & GABA_STATUS_UPDATE_B )
+#define _rqup(_fill)		( (_fill)->status & (GABA_STATUS_UPDATE_A | GABA_STATUS_UPDATE_B) )
+#define _term(_fill)		( (_fill)->status & GABA_STATUS_TERM )
+
+/**
+ * @fn ggsea_extend_update_queue_r
+ */
+static _force_inline
+gaba_fill_t const *ggsea_extend_update_queue_r(
+	struct ggsea_ctx_s *ctx,
+	gaba_fill_t const *fill,
+	gaba_fill_t const *max,
+	struct gref_section_s const *rsec,
+	struct gref_section_s const *qsec)
+{
+	struct gref_link_s rlink = gref_get_link(ctx->r, rsec->gid);
+
+	/* if len == 0, push margin */
+	if(rlink.len == 0) {
+		debug("r reached leaf");
+		/* update rsec with fw_margin */
+		rsec = &ctx->fw_margin;
+
+		/* fill loop */
+		while(1) {
+			fill = gaba_dp_fill(ctx->dp, fill,
+				(struct gaba_section_s *)rsec,
+				(struct gaba_section_s *)qsec);
+			debug("status(%x), max(%lld), r(%u), q(%u)",
+				fill->status, fill->max, rsec->gid, qsec->gid);
+			max = (fill->max > max->max) ? fill : max;
+			if(_term(fill) | _rup(fill)) { break; }
+			qsec = (_qup(fill) == 0) ? qsec : &ctx->rv_margin;
+		}
+		return(max);
+	}
+
+	/* push section pairs */
+	for(int64_t i = 0; i < rlink.len; i++) {
+		kv_hq_push(ctx->segq, ((struct ggsea_segq_s){
+			.fill = fill,
+			.rgid = rlink.gid_arr[i],
+			.qgid = qsec->gid
+		}));
+	}
+	return(max);
+}
+
+/**
+ * @fn ggsea_extend_update_queue_q
+ */
+static _force_inline
+gaba_fill_t const *ggsea_extend_update_queue_q(
+	struct ggsea_ctx_s *ctx,
+	gaba_fill_t const *fill,
+	gaba_fill_t const *max,
+	struct gref_section_s const *rsec,
+	struct gref_section_s const *qsec)
+{
+	struct gref_link_s qlink = gref_get_link(ctx->q, qsec->gid);
+
+	/* if len == 0, push margin */
+	if(qlink.len == 0) {
+		debug("q reached leaf");
+		/* update qsec with rv_margin */
+		qsec = &ctx->rv_margin;
+
+		/* fill loop */
+		while(1) {
+			fill = gaba_dp_fill(ctx->dp, fill,
+				(struct gaba_section_s *)rsec,
+				(struct gaba_section_s *)qsec);
+			debug("status(%x), max(%lld), r(%u), q(%u)",
+				fill->status, fill->max, rsec->gid, qsec->gid);
+			max = (fill->max > max->max) ? fill : max;
+
+			if(_term(fill) | _qup(fill)) { break; }
+			rsec = (_rup(fill) == 0) ? rsec : &ctx->fw_margin;
+		}
+		return(max);
+	}
+
+	/* push section pair if all the incoming edges are scaned */
+	for(int64_t i = 0; i < qlink.len; i++) {
+		kv_hq_push(ctx->segq, ((struct ggsea_segq_s){
+			.fill = fill,
+			.rgid = rsec->gid,
+			.qgid = qlink.gid_arr[i]
+		}));
+	}
+	return(max);
+}
+
+/**
+ * @fn ggsea_extend_update_queue_rq
+ */
+static _force_inline
+gaba_fill_t const *ggsea_extend_update_queue_rq(
+	struct ggsea_ctx_s *ctx,
+	gaba_fill_t const *fill,
+	gaba_fill_t const *max,
+	struct gref_section_s const *rsec,
+	struct gref_section_s const *qsec)
+{
+	/* update sections */
+	struct gref_link_s rlink = gref_get_link(ctx->r, rsec->gid);
+	struct gref_link_s qlink = gref_get_link(ctx->q, qsec->gid);
+
+	if((rlink.len | qlink.len) == 0) {
+		debug("r and q reached leaf");
+		/* fill once */
+		fill = gaba_dp_fill(ctx->dp, fill,
+			(struct gaba_section_s *)&ctx->fw_margin,
+			(struct gaba_section_s *)&ctx->rv_margin);
+		debug("status(%x), max(%lld), r(%u), q(%u)",
+			fill->status, fill->max, rsec->gid, qsec->gid);
+		max = (fill->max > max->max) ? fill : max;
+		return(max);
+	}
+
+	/* push section pair if all the incoming edges are scaned */
+	for(int64_t i = 0; i < rlink.len; i++) {
+		for(int64_t j = 0; j < qlink.len; j++) {
+			kv_hq_push(ctx->segq, ((struct ggsea_segq_s){
+				.fill = fill,
+				.rgid = rlink.gid_arr[i],
+				.qgid = qlink.gid_arr[j]
+			}));
+		}
+	}
+	return(max);
+}
+
+/**
+ * @fn ggsea_extend_update_queue
+ */
+static _force_inline
+gaba_fill_t const *ggsea_extend_update_queue(
+	struct ggsea_ctx_s *ctx,
+	gaba_fill_t const *fill,
+	gaba_fill_t const *max,
+	struct gref_section_s const *rsec,
+	struct gref_section_s const *qsec)
+{
+	uint64_t rup = _rup(fill) != 0;
+	uint64_t qup = _qup(fill) != 0;
+
+	debug("extend_update, r(%llu), q(%llu)", rup, qup);
+
+	if(rup && qup) {
+		return(ggsea_extend_update_queue_rq(ctx, fill, max, rsec, qsec));
+	} else if(rup) {
+		return(ggsea_extend_update_queue_r(ctx, fill, max, rsec, qsec));
+	} else if(qup) {
+		return(ggsea_extend_update_queue_q(ctx, fill, max, rsec, qsec));
+	} else {
+		/* never reaches here */
+	}
+	return(max);
+}
+
+/**
+ * @fn ggsea_extend_intl
+ */
+static _force_inline
+gaba_fill_t const *ggsea_extend_intl(
+	struct ggsea_ctx_s *ctx,
+	struct gref_section_s const *rsec,
+	uint32_t rpos,
+	struct gref_section_s const *qsec,
+	uint32_t qpos)
+{
+	debug("forward seed: r(%u, %u), q(%u, %u)", rsec->gid, rpos, qsec->gid, qpos);
+
+	/* flush queue */
+	kv_hq_clear(ctx->segq);
+
+	/* fill the first section */
+	gaba_fill_t const *max = NULL;
+	gaba_fill_t const *fill = max = gaba_dp_fill_root(ctx->dp,
+		(struct gaba_section_s *)rsec, rpos,
+		(struct gaba_section_s *)qsec, qpos);
+
+	debug("forward root: status(%x), max(%lld), r(%u, %u), q(%u, %u)",
+		fill->status, fill->max, rsec->gid, rpos, qsec->gid, qpos);
+
+	/* check xdrop term */
+	if((fill->status & GABA_STATUS_TERM) != 0) {
+		return(max);
+	}
+
+	/* update first joint */
+	ggsea_extend_update_queue(ctx, fill, max, rsec, qsec);
+
+	/* loop */
+	while(kv_hq_size(ctx->segq) > 0) {
+		struct ggsea_segq_s seg = kv_hq_pop(ctx->segq);
+		if(seg.fill == NULL) {
+			debug("fill == NULL (unexpected NULL pointer detected)");
+			break;
+		}
+
+		/**
+		 * Lazy merge detection comes here.
+		 * tails at the head of the queue is scaned and overlapping pairs are
+		 * detected in the lazy strategy. the detected pairs will be merged
+		 * by ggsea_merge_tails function.
+		 */
+
+		/* extend */
+		gaba_fill_t *fill = gaba_dp_fill(ctx->dp, seg.fill,
+			(struct gaba_section_s const *)gref_get_section(ctx->r, seg.rgid),
+			(struct gaba_section_s const *)gref_get_section(ctx->q, seg.qgid));
+
+		/* update max */
+		debug("check max, max(%lld), prev_max(%lld)", fill->max, max->max);
+		max = (fill->max > max->max) ? fill : max;
+
+		/* check xdrop term */
+		if((fill->status & GABA_STATUS_TERM) == 0) {
+			max = ggsea_extend_update_queue(ctx, fill, max, rsec, qsec);
+		}
+	}
+	return(max);
+}
+
+/**
+ * @fn ggsea_extend
+ */
+static _force_inline
+struct ggsea_fill_pair_s ggsea_extend(
+	struct ggsea_ctx_s *ctx,
+	struct gref_gid_pos_s rpos,
+	struct gref_gid_pos_s qpos)
+{
+	debug("extend");
+
+	/* forward section */
+	struct gref_section_s const *rfsec = gref_get_section(ctx->r, rpos.gid);
+	struct gref_section_s const *qfsec = gref_get_section(ctx->q, qpos.gid);
+	gaba_fill_t const *fw_max = ggsea_extend_intl(ctx,
+		rfsec, rpos.pos,
+		qfsec, qpos.pos);
+
+	/* reverse section */
+	struct gref_section_s const *rrsec = gref_get_section(ctx->r, gref_rev_gid(rpos.gid));
+	struct gref_section_s const *qrsec = gref_get_section(ctx->q, gref_rev_gid(qpos.gid));
+	gaba_fill_t const *rv_max = ggsea_extend_intl(ctx,
+		rrsec, rrsec->len - rpos.pos,
+		qrsec, qrsec->len - qpos.pos);
+
+	debug("fw_max(%lld), rv_max(%lld), max(%lld)",
+		ctx->fw_max->max, ctx->rv_max->max, ctx->fw_max->max + ctx->rv_max->max);
+	/* return max pair */
+	return((struct ggsea_fill_pair_s){
+		.fw = fw_max,
+		.rv = rv_max
+	});
+}
+
 
 /**
  * @fn ggsea_align
@@ -867,18 +709,7 @@ ggsea_result_t ggsea_align(
 
 		/* for all positions on ref matched with the kmer */
 		for(int64_t i = 0; i < m.len; i++) {
-
-			/* first apply popcnt filter */
-			int64_t popcnt_score = ggsea_popcnt_filter(ctx, t.gid_pos, m.gid_pos_arr[i]);
-
-			debug("popcnt(%lld, %lld)", popcnt_score, ctx->conf.params.popcnt_thresh);
-
-			if(popcnt_score <= ctx->conf.params.popcnt_thresh) {
-				ggsea_save_weak_kmer(ctx, popcnt_score, t.gid_pos, m.gid_pos_arr[i]);
-				continue;
-			}
-
-			/* passed, apply overlap filter */
+			/* apply overlap filter */
 			int64_t overlap_score = ggsea_overlap_filter(ctx, t.gid_pos, m.gid_pos_arr[i]);
 
 			debug("overlap(%lld, %lld)", overlap_score, ctx->conf.params.overlap_thresh);
@@ -889,30 +720,22 @@ ggsea_result_t ggsea_align(
 			}
 
 			/* extension */
-			ggsea_extend(ctx, t.gid_pos, m.gid_pos_arr[i]);
+			struct ggsea_fill_pair_s pair = ggsea_extend(ctx, t.gid_pos, m.gid_pos_arr[i]);
+			if(pair.fw->max + pair.rv->max <= ctx->conf.params.score_thresh) {
+				continue;
+			}
 
 			/* traceback */
-			struct gaba_result_s const *r = gaba_dp_trace(ctx->dp,
-				kv_at(ctx->res, i).fw, kv_at(ctx->res, i).rv, NULL);
+			struct gaba_result_s const *r = gaba_dp_trace(ctx->dp, pair.fw, pair.rv, NULL);
 			kv_push(aln, r);
+
+			/* update overlap filter */
+			ggsea_update_overlap_section(ctx, pair, r);
 		}
 	}
 
 	/* cleanup iterator */
 	gref_iter_clean(iter);
-
-	#if 0
-	/* recall saved seeds */
-	while(ggsea_finish(ctx) == 0) {
-		ggsea_extend(ctx, t.gid_pos, m);
-	}
-	#endif
-
-	// debug("fill end, go through to traceback");
-
-	/* traceback results */
-	// return(ggsea_refine_results(ctx));
-
 	debug("done. %llu alignments generated", kv_size(aln));
 
 	return((struct ggsea_result_s){

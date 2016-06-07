@@ -45,9 +45,6 @@ struct ggsea_params_s {
 
 	/* score thresh */
 	int64_t score_thresh;
-
-	/* number of threads in parallel radix sort */
-	uint32_t num_threads;
 };
 typedef struct ggsea_params_s ggsea_params_t;
 
@@ -85,6 +82,34 @@ ggsea_conf_t *ggsea_conf_init(
 void ggsea_conf_clean(
 	ggsea_conf_t *conf);
 
+/**
+ * @fn ggsea_ctx_init
+ * @brief initialize thread-local context with const reference index object
+ */
+ggsea_ctx_t *ggsea_ctx_init(
+	ggsea_conf_t const *conf,
+	gref_idx_t const *ref);
+
+/**
+ * @fn ggsea_ctx_clean
+ * @brief cleanup thread-local context
+ */
+void ggsea_ctx_clean(
+	ggsea_ctx_t *ctx);
+
+/**
+ * @fn ggsea_align
+ * @brief do pairwise local alignment between reference in the context and given query
+ */
+ggsea_result_t ggsea_align(
+	ggsea_ctx_t *_ctx,
+	gref_acv_t const *query);
+
+/**
+ * @fn ggsea_aln_free
+ */
+void ggsea_aln_free(
+	ggsea_result_t aln);
 
 
 #endif /* _GGSEA_H_INCLUDED */

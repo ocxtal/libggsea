@@ -61,7 +61,6 @@ ggsea_conf_t *ggsea_conf_init(
 	restore(p.overlap_thresh, 3);
 	restore(p.popcnt_thresh, 25);
 	restore(p.score_thresh, 0);			/* score positive */
-	restore(p.num_threads, 0);
 
 	#undef restore
 
@@ -316,7 +315,7 @@ int64_t ggsea_dedup_rep_kmer(
 	int64_t size)
 {
 	/* sort */
-	psort_full((void *)ptr, size, sizeof(struct gref_gid_pos_s), ctx->conf.params.num_threads);
+	psort_full((void *)ptr, size, sizeof(struct gref_gid_pos_s), 0);
 
 	/* dedup */
 	uint64_t *p = (uint64_t *)ptr;

@@ -659,7 +659,7 @@ struct ggsea_fill_pair_s ggsea_extend(
 		qrsec, qrsec->len - qpos.pos);
 
 	debug("fw_max(%lld), rv_max(%lld), max(%lld)",
-		ctx->fw_max->max, ctx->rv_max->max, ctx->fw_max->max + ctx->rv_max->max);
+		fw_max->max, rv_max->max, fw_max->max + rv_max->max);
 	/* return max pair */
 	return((struct ggsea_fill_pair_s){
 		.fw = fw_max,
@@ -671,7 +671,7 @@ struct ggsea_fill_pair_s ggsea_extend(
 /**
  * @fn ggsea_align
  */
-ggsea_result_t ggsea_align(
+struct ggsea_result_s ggsea_align(
 	ggsea_ctx_t *_ctx,
 	gref_acv_t const *query)
 {

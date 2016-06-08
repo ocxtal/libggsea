@@ -101,7 +101,7 @@ void ggsea_ctx_clean(
  * @fn ggsea_align
  * @brief do pairwise local alignment between reference in the context and given query
  */
-ggsea_result_t ggsea_align(
+struct ggsea_result_s ggsea_align(
 	ggsea_ctx_t *_ctx,
 	gref_acv_t const *query);
 

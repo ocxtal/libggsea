@@ -438,6 +438,7 @@ gaba_fill_t const *ggsea_extend_update_queue_r(
 			if(_term(fill) | _rup(fill)) { break; }
 			qsec = (_qup(fill) == 0) ? qsec : &ctx->rv_margin;
 		}
+		debug("r leaf finished, max(%lld)", max->max);
 		return(max);
 	}
 
@@ -484,6 +485,7 @@ gaba_fill_t const *ggsea_extend_update_queue_q(
 			if(_term(fill) | _qup(fill)) { break; }
 			rsec = (_rup(fill) == 0) ? rsec : &ctx->fw_margin;
 		}
+		debug("q leaf finished, max(%lld)", max->max);
 		return(max);
 	}
 
@@ -523,6 +525,7 @@ gaba_fill_t const *ggsea_extend_update_queue_rq(
 		debug("status(%x), max(%lld), r(%u), q(%u)",
 			fill->status, fill->max, rsec->gid, qsec->gid);
 		max = (fill->max > max->max) ? fill : max;
+		debug("rq leaf finished, max(%lld)", max->max);
 		return(max);
 	}
 
@@ -599,7 +602,7 @@ gaba_fill_t const *ggsea_extend_intl(
 	}
 
 	/* update first joint */
-	ggsea_extend_update_queue(ctx, fill, max, rsec, qsec);
+	max = ggsea_extend_update_queue(ctx, fill, max, rsec, qsec);
 
 	/* loop */
 	while(kv_hq_size(ctx->segq) > 0) {
@@ -628,8 +631,11 @@ gaba_fill_t const *ggsea_extend_intl(
 		/* check xdrop term */
 		if((fill->status & GABA_STATUS_TERM) == 0) {
 			max = ggsea_extend_update_queue(ctx, fill, max, rsec, qsec);
+			debug("queue updated, max(%lld)", max->max);
 		}
 	}
+
+	debug("extend finished, max(%lld)", max->max);
 	return(max);
 }
 

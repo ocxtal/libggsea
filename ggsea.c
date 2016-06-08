@@ -137,6 +137,7 @@ struct ggsea_node_s {
  * @brief segment info container (to push into heapqueue)
  */
 struct ggsea_segq_s {
+	int64_t psum;
 	gaba_fill_t const *fill;
 	uint32_t rgid;
 	uint32_t qgid;
@@ -160,8 +161,6 @@ struct ggsea_ctx_s {
 	/* current seqeunce info */
 	gref_idx_t const *r;
 	gref_acv_t const *q;
-	int64_t rlim;
-	int64_t qlim;
 
 	/* repetitive kmer container */
 	hmap_t *rep_kmer;
@@ -225,8 +224,6 @@ ggsea_ctx_t *ggsea_ctx_init(
 	}
 	ctx->r = ref;
 	ctx->q = NULL;
-	ctx->rlim = 2 * gref_get_total_len(ref);
-	ctx->qlim = 0;
 
 	/* init dp context (with invalid seq pair) */
 	ctx->dp = gaba_dp_init(conf->gaba, NULL, NULL);
@@ -291,12 +288,12 @@ void ggsea_ctx_flush(
 
 	/* set sequence info */
 	ctx->q = query;
-	ctx->qlim = 2 * gref_get_total_len(query);
 
 	/* flush queues */
 	kv_hq_clear(ctx->segq);
 
 	/* flush dp context for the new read */
+	debug("rlim(%p), qlim(%p)", gref_get_lim(ctx->r), gref_get_lim(ctx->q));
 	gaba_dp_flush(ctx->dp, gref_get_lim(ctx->r), gref_get_lim(ctx->q));
 
 	debug("flushed");
@@ -447,6 +444,7 @@ gaba_fill_t const *ggsea_extend_update_queue_r(
 	/* push section pairs */
 	for(int64_t i = 0; i < rlink.len; i++) {
 		kv_hq_push(ctx->segq, ((struct ggsea_segq_s){
+			.psum = (int64_t)fill->psum,
 			.fill = fill,
 			.rgid = rlink.gid_arr[i],
 			.qgid = qsec->gid
@@ -492,6 +490,7 @@ gaba_fill_t const *ggsea_extend_update_queue_q(
 	/* push section pair if all the incoming edges are scaned */
 	for(int64_t i = 0; i < qlink.len; i++) {
 		kv_hq_push(ctx->segq, ((struct ggsea_segq_s){
+			.psum = (int64_t)fill->psum,
 			.fill = fill,
 			.rgid = rsec->gid,
 			.qgid = qlink.gid_arr[i]
@@ -531,6 +530,7 @@ gaba_fill_t const *ggsea_extend_update_queue_rq(
 	for(int64_t i = 0; i < rlink.len; i++) {
 		for(int64_t j = 0; j < qlink.len; j++) {
 			kv_hq_push(ctx->segq, ((struct ggsea_segq_s){
+				.psum = (int64_t)fill->psum,
 				.fill = fill,
 				.rgid = rlink.gid_arr[i],
 				.qgid = qlink.gid_arr[j]
@@ -579,7 +579,7 @@ gaba_fill_t const *ggsea_extend_intl(
 	struct gref_section_s const *qsec,
 	uint32_t qpos)
 {
-	debug("forward seed: r(%u, %u), q(%u, %u)", rsec->gid, rpos, qsec->gid, qpos);
+	debug("seed: r(%u, %u), q(%u, %u)", rsec->gid, rpos, qsec->gid, qpos);
 
 	/* flush queue */
 	kv_hq_clear(ctx->segq);
@@ -590,7 +590,7 @@ gaba_fill_t const *ggsea_extend_intl(
 		(struct gaba_section_s *)rsec, rpos,
 		(struct gaba_section_s *)qsec, qpos);
 
-	debug("forward root: status(%x), max(%lld), r(%u, %u), q(%u, %u)",
+	debug("root: status(%x), max(%lld), r(%u, %u), q(%u, %u)",
 		fill->status, fill->max, rsec->gid, rpos, qsec->gid, qpos);
 
 	/* check xdrop term */
@@ -642,9 +642,8 @@ struct ggsea_fill_pair_s ggsea_extend(
 	struct gref_gid_pos_s rpos,
 	struct gref_gid_pos_s qpos)
 {
-	debug("extend");
-
 	/* forward section */
+	debug("forward extend");
 	struct gref_section_s const *rfsec = gref_get_section(ctx->r, rpos.gid);
 	struct gref_section_s const *qfsec = gref_get_section(ctx->q, qpos.gid);
 	gaba_fill_t const *fw_max = ggsea_extend_intl(ctx,
@@ -652,6 +651,7 @@ struct ggsea_fill_pair_s ggsea_extend(
 		qfsec, qpos.pos);
 
 	/* reverse section */
+	debug("reverse extend");
 	struct gref_section_s const *rrsec = gref_get_section(ctx->r, gref_rev_gid(rpos.gid));
 	struct gref_section_s const *qrsec = gref_get_section(ctx->q, gref_rev_gid(qpos.gid));
 	gaba_fill_t const *rv_max = ggsea_extend_intl(ctx,
@@ -702,24 +702,24 @@ struct ggsea_result_s ggsea_align(
 
 		/* check if kmer is repetitive */
 		if(m.len > ctx->conf.params.kmer_cnt_thresh) {
-			ggsea_save_rep_kmer(ctx, t.kmer, t.gid_pos, m.gid_pos_arr[0]);
+			ggsea_save_rep_kmer(ctx, t.kmer, m.gid_pos_arr[0], t.gid_pos);
 			continue;
 		}
 
 		/* for all positions on ref matched with the kmer */
 		for(int64_t i = 0; i < m.len; i++) {
 			/* apply overlap filter */
-			int64_t overlap_score = ggsea_overlap_filter(ctx, t.gid_pos, m.gid_pos_arr[i]);
+			int64_t overlap_score = ggsea_overlap_filter(ctx, m.gid_pos_arr[i], t.gid_pos);
 
 			debug("overlap(%lld, %lld)", overlap_score, ctx->conf.params.overlap_thresh);
 
 			if(overlap_score <= ctx->conf.params.overlap_thresh) {
-				ggsea_save_overlap_kmer(ctx, overlap_score, t.gid_pos, m.gid_pos_arr[i]);
+				ggsea_save_overlap_kmer(ctx, overlap_score, m.gid_pos_arr[i], t.gid_pos);
 				continue;
 			}
 
 			/* extension */
-			struct ggsea_fill_pair_s pair = ggsea_extend(ctx, t.gid_pos, m.gid_pos_arr[i]);
+			struct ggsea_fill_pair_s pair = ggsea_extend(ctx, m.gid_pos_arr[i], t.gid_pos);
 			if(pair.fw->max + pair.rv->max <= ctx->conf.params.score_thresh) {
 				continue;
 			}

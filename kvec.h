@@ -67,17 +67,17 @@ int main() {
 #include <string.h>
 #include <stdint.h>
 
-#define kv_roundup32(x) (--(x), (x)|=(x)>>1, (x)|=(x)>>2, (x)|=(x)>>4, (x)|=(x)>>8, (x)|=(x)>>16, ++(x))
+// #define kv_roundup32(x) (--(x), (x)|=(x)>>1, (x)|=(x)>>2, (x)|=(x)>>4, (x)|=(x)>>8, (x)|=(x)>>16, ++(x))
 #define kv_roundup(x, base)			( (((x) + (base) - 1) / (base)) * (base) )
+#define kv_max2(a, b)				( ((a) < (b)) ? (b) : (a) )
 
-
-#define _INIT 			( 256 )
+#define KVEC_INIT_SIZE 			( 256 )
 
 /**
  * basic vectors (kv_*)
  */
 #define kvec_t(type)    struct { uint64_t n, m; type *a; }
-#define kv_init(v)      ({ (v).n = 0; (v).m = _INIT; (v).a = calloc((v).m, sizeof(*(v).a)); (v); })
+#define kv_init(v)      ({ (v).n = 0; (v).m = KVEC_INIT_SIZE; (v).a = calloc((v).m, sizeof(*(v).a)); (v); })
 #define kv_destroy(v)   { free((v).a); (v).a = NULL; }
 // #define kv_A(v, i)      ( (v).a[(i)] )
 #define kv_pop(v)       ( (v).a[--(v).n] )
@@ -115,7 +115,7 @@ int main() {
 #define kv_pusha(elem_t, v, x) do { \
 		uint64_t size = kv_roundup(sizeof(elem_t), sizeof(*(v).a)); \
 		if(sizeof(*(v).a) * ((v).m - (v).n) < size) { \
-			(v).m = (v).m * 2;								\
+			(v).m = kv_max2((v).m * 2, (v).n + (size));		\
 			(v).a = realloc((v).a, sizeof(*(v).a) * (v).m);	\
 		} \
 		*((elem_t *)&((v).a[(v).n])) = (x); \
@@ -124,7 +124,7 @@ int main() {
 
 #define kv_pushm(v, arr, size) do { \
 		if(sizeof(*(v).a) * ((v).m - (v).n) < (uint64_t)(size)) { \
-			(v).m = (v).m * 2;								\
+			(v).m = kv_max2((v).m * 2, (v).n + (size));		\
 			(v).a = realloc((v).a, sizeof(*(v).a) * (v).m);	\
 		} \
 		for(uint64_t _i = 0; _i < (uint64_t)(size); _i++) { \
@@ -135,7 +135,7 @@ int main() {
 
 #define kv_a(v, i) ( \
 	((v).m <= (size_t)(i) ? \
-	((v).m = (v).n = (i) + 1, kv_roundup32((v).m), \
+	((v).m = (v).n = (i) + 1, kv_roundup((v).m, 32), \
 	 (v).a = realloc((v).a, sizeof(*(v).a) * (v).m), 0) \
 	: (v).n <= (size_t)(i) ? (v).n = (i) + 1 \
 	: 0), (v).a[(i)])
@@ -201,7 +201,7 @@ int main() {
 #define kpv_mask(v, e)  ( (e) & ((1<<_BITS) - 1) )
 
 #define kpvec_t(type)       struct { uint64_t n, m; type *a; }
-#define kpv_init(v)         ( (v).n = 0, (v).m = _INIT * kpv_elems(v), (v).a = calloc((v).m, sizeof(*(v).a)) )
+#define kpv_init(v)         ( (v).n = 0, (v).m = KVEC_INIT_SIZE * kpv_elems(v), (v).a = calloc((v).m, sizeof(*(v).a)) )
 #define kpv_destroy(v)      { free((v).a); (v).a = NULL; }
 
 // #define kpv_A(v, i) ( kpv_mask(v, (v).a[(i) / kpv_elems(v)]>>kpv_base(v, i)) )
@@ -226,7 +226,7 @@ int main() {
 		if ((v1).m < (v0).n) kpv_resize(v1, (v0).n);	\
 		(v1).n = (v0).n;								\
 		memcpy((v1).a, (v0).a, kpv_amax(v));				\
-	} while (0)											\
+	} while (0)
 /*
 #define kpv_push(v, x) do {								\
 		if ((v).n == (v).m) {							\
@@ -254,7 +254,7 @@ int main() {
 		(v).n++; \
 	} while (0)
 
-/* *
+/*
  * kpv_pushp is not supported
  */
 #if 0
@@ -267,7 +267,7 @@ int main() {
 
 #define kpv_a(v, i) ( \
 	((v).m <= (size_t)(i)? \
-	((v).m = (v).n = (i) + 1, kv_roundup32((v).m), \
+	((v).m = (v).n = (i) + 1, kv_roundup((v).m, 32), \
 	 (v).a = realloc((v).a, sizeof(*(v).a) * (v).m), 0) \
 	: (v).n <= (size_t)(i)? (v).n = (i) + 1 \
 	: 0), kpv_mask(v, (v).a[(i) / kpv_elems(v)]>>kpv_base(v, i)) )

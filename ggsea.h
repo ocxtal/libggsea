@@ -35,6 +35,7 @@ struct ggsea_params_s {
 	gaba_score_t const *score_matrix;
 
 	/* repetitive kmer filter */
+	int64_t k;
 	int64_t kmer_cnt_thresh;		/* kmer count threshold */
 
 	/* overlap filter thresh */

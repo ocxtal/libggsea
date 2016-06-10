@@ -14,11 +14,13 @@
 #include <stdint.h>
 #include "ggsea.h"
 #include "hmap/hmap.h"
+#include "psort/psort.h"
+#include "tree/tree.h"
 #include "gref/gref.h"
 #include "gaba/gaba.h"
-#include "psort/psort.h"
 #include "kvec.h"
 #include "sassert.h"
+#include "lmm.h"
 #include "log.h"
 
 /* inline directive */
@@ -29,7 +31,12 @@
 #define MARGIN_SEQ_OFFSET			( 16 )
 #define MARGIN_SEQ_LEN				( 32 )
 
+/* max and min */
+#define MAX2(x,y) 		( (x) > (y) ? (x) : (y) )
+#define MIN2(x,y) 		( (x) < (y) ? (x) : (y) )
 
+
+/* structs */
 /**
  * @struct ggsea_conf_s
  * @brief configuration container
@@ -41,9 +48,87 @@ struct ggsea_conf_s {
 	/* params */
 	int64_t rep_kmer_hmap_size;
 	int64_t max_rep_vec_size;		/* max kmer vector size */
+	int64_t overlap_width;			/* overlap filter width */
 	struct ggsea_params_s params;
 };
 
+/**
+ * @struct ggsea_rep_kmer_cont_s
+ */
+struct ggsea_rep_kmer_cont_s {
+	hmap_header_t header;
+	uint64_t vec_size;
+	kvec_t(struct gref_gid_pos_s) rv;
+	kvec_t(struct gref_gid_pos_s) qv;
+};
+
+/**
+ * @struct ggsea_region_s
+ */
+struct ggsea_region_s {
+	tree_node_t h;					/* (40) header */
+	int64_t len;					/* q section length */
+	int64_t sp, ep;					/* start and end p coordinate */
+	int64_t depth;
+	int64_t score;
+};
+// _static_assert(sizeof(struct ggsea_region_s) == 96);
+
+/**
+ * @struct ggsea_overlap_s
+ */
+struct ggsea_overlap_s {
+	int64_t score;
+	struct ggsea_region_s *region;
+};
+
+/**
+ * @struct ggsea_segq_s
+ * @brief segment info container (to push into heapqueue)
+ */
+struct ggsea_segq_s {
+	int64_t psum;
+	gaba_fill_t const *fill;
+	uint32_t rgid;
+	uint32_t qgid;
+};
+_static_assert(sizeof(struct ggsea_segq_s) == 24);
+
+/**
+ * @struct ggsea_fill_pair_s
+ */
+struct ggsea_fill_pair_s {
+	gaba_fill_t const *fw;
+	gaba_fill_t const *rv;
+};
+
+/**
+ * @struct ggsea_ctx_s
+ */
+struct ggsea_ctx_s {
+	/* constants */
+	struct ggsea_conf_s conf;	/* copy of conf */
+
+	/* current seqeunce info */
+	gref_idx_t const *r;
+	gref_acv_t const *q;
+
+	/* repetitive kmer container */
+	hmap_t *rep_kmer;
+
+	/* overlap filter */
+	tree_t *tree;
+
+	/* dp context */
+	gaba_dp_t *dp;
+	struct ggsea_node_s *node;			/* node info array */
+	kvec_t(struct ggsea_segq_s) segq;	/* segment queue */
+	uint8_t *margin;
+	struct gref_section_s fw_margin, rv_margin;
+};
+
+
+/* conf init / clean */
 /**
  * @fn ggsea_conf_init
  */
@@ -57,6 +142,7 @@ ggsea_conf_t *ggsea_conf_init(
 	/* restore defaults */
 	#define restore(param, def)		{ (param) = ((uint64_t)(param) == 0) ? (def) : (param); }
 
+	restore(p.k, 0);
 	restore(p.kmer_cnt_thresh, 100);
 	restore(p.overlap_thresh, 3);
 	restore(p.popcnt_thresh, 25);
@@ -85,6 +171,7 @@ ggsea_conf_t *ggsea_conf_init(
 	/* store constants */
 	conf->rep_kmer_hmap_size = 1024;
 	conf->max_rep_vec_size = 128;
+	conf->overlap_width = 32;
 	conf->params = p;
 
 	return((ggsea_conf_t *)conf);
@@ -105,77 +192,8 @@ void ggsea_conf_clean(
 	return;
 }
 
-/**
- * @struct ggsea_rep_kmer_cont_s
- */
-struct ggsea_rep_kmer_cont_s {
-	hmap_header_t header;
-	uint64_t vec_size;
-	kvec_t(struct gref_gid_pos_s) rv;
-	kvec_t(struct gref_gid_pos_s) qv;
-};
 
-/**
- * @struct ggsea_weak_kmer_s
- */
-struct ggsea_weak_kmer_s {
-	// uint64_t kmer;			/* kmer info is not necessary */
-	struct gref_gid_pos_s rpos;
-	struct gref_gid_pos_s qpos;
-};
-
-/**
- * @struct ggsea_node_s
- * @brief element of node array
- */
-struct ggsea_node_s {
-	uint64_t incoming_edges;
-};
-
-/**
- * @struct ggsea_segq_s
- * @brief segment info container (to push into heapqueue)
- */
-struct ggsea_segq_s {
-	int64_t psum;
-	gaba_fill_t const *fill;
-	uint32_t rgid;
-	uint32_t qgid;
-};
-
-/**
- * @struct ggsea_fill_pair_s
- */
-struct ggsea_fill_pair_s {
-	gaba_fill_t const *fw;
-	gaba_fill_t const *rv;
-};
-
-/**
- * @struct ggsea_ctx_s
- */
-struct ggsea_ctx_s {
-	/* constants */
-	struct ggsea_conf_s conf;	/* copy of conf */
-
-	/* current seqeunce info */
-	gref_idx_t const *r;
-	gref_acv_t const *q;
-
-	/* repetitive kmer container */
-	hmap_t *rep_kmer;
-
-	/* overlap filter */
-
-	/* dp context */
-	gaba_dp_t *dp;
-	struct ggsea_node_s *node;			/* node info array */
-	kvec_t(struct ggsea_segq_s) segq;	/* segment queue */
-	uint8_t *margin;
-	struct gref_section_s fw_margin, rv_margin;
-};
-
-
+/* context init / clean */
 /**
  * @fn ggsea_ctx_clean
  */
@@ -231,12 +249,17 @@ ggsea_ctx_t *ggsea_ctx_init(
 		goto _ggsea_ctx_init_error_handler;
 	}
 
+	#if 0
 	/* init node array */
 	uint32_t sec_cnt = gref_get_section_count(ref);
 	ctx->node = (struct ggsea_node_s *)malloc(sizeof(struct ggsea_node_s) * sec_cnt);
 	if(ctx->node == NULL) {
 		goto _ggsea_ctx_init_error_handler;
 	}
+	#endif
+
+	/* init overlap tree */
+	ctx->tree = tree_init(sizeof(struct ggsea_region_s) - sizeof(tree_node_t), NULL);
 
 	/* init queue */
 	kv_hq_init(ctx->segq);
@@ -250,7 +273,6 @@ ggsea_ctx_t *ggsea_ctx_init(
 	if(ctx->margin == NULL) {
 		goto _ggsea_ctx_init_error_handler;
 	}
-	// uint8_t const pad[7] = { [GABA_ASCII] = 'A' };
 
 	/* init forward margin section */
 	memset(ctx->margin, 0, MARGIN_SEQ_SIZE);
@@ -360,6 +382,32 @@ void ggsea_save_rep_kmer(
 
 /* overlap filters (not implemented yet) */
 /**
+ * @fn ggsea_calc_q
+ * @brief calculate q coordinate for use in the overlap filter
+ */
+static _force_inline
+int64_t ggsea_calc_q(
+	struct gref_gid_pos_s rpos,
+	struct gref_gid_pos_s qpos,
+	uint32_t offset)
+{
+	union ggsea_q_u {
+		int64_t q;
+		struct ggsea_q_elems_s {
+			uint32_t pos;
+			uint32_t gid;
+		} e;
+	};
+
+	return(((union ggsea_q_u){
+		.e = ((struct ggsea_q_elems_s){
+			.pos = 0x80000000 ^ (rpos.pos - qpos.pos - offset),
+			.gid = rpos.gid ^ ((qpos.gid<<16) | (qpos.gid>>16))
+		})
+	}).q);
+}
+
+/**
  * @fn ggsea_overlap_filter
  */
 static _force_inline
@@ -368,8 +416,35 @@ int64_t ggsea_overlap_filter(
 	struct gref_gid_pos_s rpos,
 	struct gref_gid_pos_s qpos)
 {
-	int64_t score = 6;
-	return(score);
+	/* calc p (pos) and q (key) */
+	int64_t pos = rpos.pos + qpos.pos + ctx->conf.params.k;
+	int64_t key = ggsea_calc_q(rpos, qpos, ctx->conf.overlap_width);
+
+	debug("pos(%lld), key(%lld)", pos, key);
+
+	/* retrieve leftmost overlapped section */
+	struct ggsea_region_s *n = (struct ggsea_region_s *)
+		tree_search_key_right(ctx->tree, key);
+
+	if(n != NULL) {
+		debug("n(%p), n->h.key(%lld), n->len(%lld), n->sp(%lld), n->ep(%lld)", n, n->h.key, n->len, n->sp, n->ep);
+	}
+
+	/* itarate over regions */
+	int64_t depth = INT64_MAX;
+	while(n != NULL && n->h.key < (key + ctx->conf.overlap_width)) {
+		/* check if the depth exceeds the threshold */
+		if(n->sp < pos && pos < n->ep) {
+			depth = MIN2(depth, n->depth);
+		}
+
+		/* retrieve the next region */
+		n = (struct ggsea_region_s *)tree_right(ctx->tree, (tree_node_t *)n);
+		if(n != NULL) {
+			debug("n(%p), n->h.key(%lld), n->len(%lld), n->sp(%lld), n->ep(%lld)", n, n->h.key, n->len, n->sp, n->ep);
+		}
+	}
+	return((depth == INT64_MAX) ? 0 : depth);
 }
 
 /**
@@ -382,6 +457,7 @@ void ggsea_save_overlap_kmer(
 	struct gref_gid_pos_s rpos,
 	struct gref_gid_pos_s qpos)
 {
+	/* discard (not implemented yet) */
 	return;
 }
 
@@ -394,9 +470,84 @@ void ggsea_update_overlap_section(
 	struct ggsea_fill_pair_s pair,
 	struct gaba_result_s const *r)
 {
+	for(int64_t i = 0; i < r->slen; i++) {
+
+		/* calc p (pos) and q (key) */
+		int64_t sp = r->sec[i].apos + r->sec[i].bpos;
+		int64_t ep = sp + r->sec[i].alen + r->sec[i].blen;
+		int64_t key = ggsea_calc_q(
+			(struct gref_gid_pos_s){
+				.gid = r->sec[i].aid,
+				.pos = r->sec[i].apos
+			},
+			(struct gref_gid_pos_s){
+				.gid = r->sec[i].bid,
+				.pos = r->sec[i].bpos
+			},
+			ctx->conf.overlap_width);
+
+
+		/* search overlapping regions */
+		struct ggsea_region_s *n = (struct ggsea_region_s *)
+			tree_search_key_right(ctx->tree, key);
+
+		if(n != NULL) {
+			debug("n(%p), n->h.key(%lld), n->len(%lld), n->sp(%lld), n->ep(%lld)", n, n->h.key, n->len, n->sp, n->ep);
+		}
+
+		/* itarate over regions */
+		int64_t hit = 0;
+		while(n != NULL && n->h.key < (key + ctx->conf.overlap_width)) {
+			if(n->sp < (sp + 16) && (ep - 16) < n->ep) {
+				hit++;
+				n->depth++;
+				n->score = MAX2(n->score, r->score);
+			}
+
+			/* retrieve the next region */
+			n = (struct ggsea_region_s *)tree_right(ctx->tree, (tree_node_t *)n);
+			if(n != NULL) {
+				debug("n(%p), n->h.key(%lld), n->len(%lld), n->sp(%lld), n->ep(%lld)", n, n->h.key, n->len, n->sp, n->ep);
+			}
+		}
+
+		if(hit == 0) {
+			/* add new region */
+			*(n = (struct ggsea_region_s *)r - 1) = (struct ggsea_region_s){
+				.h.zero = 0,
+				.h.key = key,
+				.len = ctx->conf.overlap_width,
+				.sp = sp,
+				.ep = ep,
+				.depth = 1,
+				.score = r->score
+			};
+
+			debug("n(%p), n->h.key(%lld), n->len(%lld), n->sp(%lld), n->ep(%lld)", n, n->h.key, n->len, n->sp, n->ep);
+			tree_insert(ctx->tree, (tree_node_t *)n);
+		}
+	}
 	return;
 }
 
+#if 0
+/**
+ * @fn ggsea_clean_overlap_filter
+ */
+static
+void ggsea_free_tree_elem(
+	tree_node_t *node)
+{
+	return;
+}
+static _force_inline
+void ggsea_clean_overlap_filter(
+	struct ggsea_ctx_s *ctx)
+{
+	tree_iterate(ctx->tree, )
+	return;
+}
+#endif
 
 /* graph traverse functions */
 /**
@@ -715,12 +866,12 @@ struct ggsea_result_s ggsea_align(
 		/* for all positions on ref matched with the kmer */
 		for(int64_t i = 0; i < m.len; i++) {
 			/* apply overlap filter */
-			int64_t overlap_score = ggsea_overlap_filter(ctx, m.gid_pos_arr[i], t.gid_pos);
+			int64_t score = ggsea_overlap_filter(ctx, m.gid_pos_arr[i], t.gid_pos);
 
-			debug("overlap(%lld, %lld)", overlap_score, ctx->conf.params.overlap_thresh);
+			debug("overlap(%lld, %lld)", score, ctx->conf.params.overlap_thresh);
 
-			if(overlap_score <= ctx->conf.params.overlap_thresh) {
-				ggsea_save_overlap_kmer(ctx, overlap_score, m.gid_pos_arr[i], t.gid_pos);
+			if(score >= ctx->conf.params.overlap_thresh) {
+				ggsea_save_overlap_kmer(ctx, score, m.gid_pos_arr[i], t.gid_pos);
 				continue;
 			}
 
@@ -765,12 +916,13 @@ void ggsea_aln_free(
 /* global configuration */
 unittest_config(
 	.name = "ggsea",
-	.depends_on = { "hmap", "gref", "gaba", "psort" }
+	.depends_on = { "hmap", "psort", "tree", "gref", "gaba" }
 );
 
 #define _str(x)		x, strlen(x)
 #define _seq(x)		(uint8_t const *)(x), strlen(x)
 
+#if 0
 /* create conf */
 unittest()
 {
@@ -808,7 +960,7 @@ unittest()
 	ggsea_ctx_clean(sea);
 	ggsea_conf_clean(conf);
 }
-
+#endif
 /* omajinais */
 #define with_default_conf() \
 	.init = (void *(*)(void *))ggsea_conf_init, \
@@ -819,7 +971,7 @@ unittest()
 
 #define omajinai() \
 	ggsea_conf_t *conf = (ggsea_conf_t *)ctx;
-
+#if 0
 /* omajinai test */
 unittest(with_default_conf())
 {
@@ -832,10 +984,12 @@ unittest(with_default_conf())
 {
 	omajinai();
 
+	/* build sequence pool */
 	gref_pool_t *pool = gref_init_pool(GREF_PARAMS( .k = 3 ));
 	gref_append_segment(pool, _str("seq1"), _seq("ACGTACGTACGTAACCACGTACGTACGT"));
 	gref_idx_t *idx = gref_build_index(gref_freeze_pool(pool));
 
+	/* build ggsea context */
 	ggsea_ctx_t *sea = ggsea_ctx_init(conf, idx);
 
 	/* align */
@@ -844,6 +998,39 @@ unittest(with_default_conf())
 
 	ggsea_aln_free(r);
 	ggsea_ctx_clean(sea);
+	gref_clean(idx);
+}
+#endif
+/* longer sequence */
+unittest(with_default_conf())
+{
+	omajinai();
+
+	/* build reference index object */
+	gref_pool_t *rpool = gref_init_pool(GREF_PARAMS( .k = 14 ));
+	gref_append_segment(rpool, _str("ref1"),
+		_seq("CTCACCTCGCTCAAAAGGGCTGCCTCCGAGCGTGTGGGCGAGGACAACCGCCCCACAGTCAAGCTCGAATGGGTGCTATTGCGTAGCTAGGACCGGCACT"));
+	gref_idx_t *ref = gref_build_index(gref_freeze_pool(rpool));
+
+	/* build query sequence iterator */
+	gref_pool_t *qpool = gref_init_pool(GREF_PARAMS( .k = 14 ));
+	gref_append_segment(qpool, _str("query1"),
+		_seq("GGCTGCCTCCGAGCGTGTGGGCGAGGACAACCGCCCCACAGTCAAGCTCGAA"));
+	gref_acv_t *query = gref_freeze_pool(qpool);
+
+
+	/* build ggsea context */
+	ggsea_ctx_t *sea = ggsea_ctx_init(conf, ref);
+
+	/* align */
+	ggsea_result_t r = ggsea_align(sea, query);
+	assert(r.aln != NULL, "%p", r.aln);
+
+	/* cleanup */
+	ggsea_aln_free(r);
+	ggsea_ctx_clean(sea);
+	gref_clean(ref);
+	gref_clean(query);
 }
 
 /**

@@ -6,6 +6,7 @@ def options(opt):
 	opt.recurse('gref')
 	opt.recurse('gaba')
 	opt.recurse('psort')
+	opt.recurse('tree')
 
 	opt.load('compiler_c')
 
@@ -14,6 +15,7 @@ def configure(conf):
 	conf.recurse('gref')
 	conf.recurse('gaba')
 	conf.recurse('psort')
+	conf.recurse('tree')
 
 	conf.load('ar')
 	conf.load('compiler_c')
@@ -23,9 +25,9 @@ def configure(conf):
 	conf.env.append_value('CFLAGS', '-march=native')
 
 	conf.env.append_value('LIB_GGSEA',
-		conf.env.LIB_HMAP + conf.env.LIB_GREF + conf.env.LIB_GABA + conf.env.LIB_PSORT)
+		conf.env.LIB_HMAP + conf.env.LIB_GREF + conf.env.LIB_GABA + conf.env.LIB_PSORT + conf.env.LIB_TREE)
 	conf.env.append_value('OBJ_GGSEA',
-		['ggsea.o'] + conf.env.OBJ_HMAP + conf.env.OBJ_GREF + conf.env.OBJ_GABA + conf.env.OBJ_PSORT)
+		['ggsea.o'] + conf.env.OBJ_HMAP + conf.env.OBJ_GREF + conf.env.OBJ_GABA + conf.env.OBJ_PSORT + conf.env.OBJ_TREE)
 
 
 def build(bld):
@@ -33,6 +35,7 @@ def build(bld):
 	bld.recurse('gref')
 	bld.recurse('gaba')
 	bld.recurse('psort')
+	bld.recurse('tree')
 
 	bld.objects(source = 'ggsea.c', target = 'ggsea.o')
 
